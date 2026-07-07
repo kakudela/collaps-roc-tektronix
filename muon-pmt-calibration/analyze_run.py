@@ -62,7 +62,7 @@ int waveform_peak_index(const RVec<Short_t>& wf) {
 DEFAULT_INDEX_PHP = os.path.expanduser("~/public_html/fccee/beam_background/index.php")
 
 
-def fit_landau(hist, fit_lo, fit_hi):
+def fit_landau(hist, fit_lo, fit_hi, rebin_factor=1):
     """Fit a Landau distribution (the standard shape for charged-particle
     energy loss through a fixed thickness of material) to a charge-integral
     histogram. Returns (params_dict_or_None, TF1).
@@ -71,12 +71,27 @@ def fit_landau(hist, fit_lo, fit_hi):
     partly shaped by that selection, not pure physics, so including the very
     bottom of the distribution would bias the fit. fit_hi excludes the
     sparsest part of the far tail, where per-bin statistics are too low to
-    usefully constrain the fit."""
+    usefully constrain the fit.
+
+    rebin_factor merges this many display-bins into one wider "fit bin"
+    before fitting. The fit is genuinely sensitive to bin width: chi-squared
+    per bin uses sqrt(counts) as the expected statistical noise, so if bins
+    are so fine that some only have a handful of entries (or zero), that
+    noise estimate gets noisy/unreliable itself, which can inflate chi2/ndf
+    for reasons that have nothing to do with whether the Landau shape is
+    actually a good description of the data. Rebinning for the fit only
+    (the displayed histogram is untouched) keeps the fit on bins with
+    healthy statistics regardless of how finely the plot itself is binned."""
+    hfit = hist.Clone(f"{hist.GetName()}_fitcopy")
+    hfit.SetDirectory(0)
+    if rebin_factor > 1:
+        hfit.Rebin(rebin_factor)
+
     name = f"landau_{hist.GetName()}"
     f = ROOT.TF1(name, "landau", fit_lo, fit_hi)
-    peak_x = hist.GetXaxis().GetBinCenter(hist.GetMaximumBin())
-    f.SetParameters(hist.GetMaximum(), peak_x, max(hist.GetRMS() * 0.5, 0.5))
-    fit_result = hist.Fit(f, "SQR")  # S=return result, Q=quiet, R=use f's own range
+    peak_x = hfit.GetXaxis().GetBinCenter(hfit.GetMaximumBin())
+    f.SetParameters(hfit.GetMaximum(), peak_x, max(hfit.GetRMS() * 0.5, 0.5))
+    fit_result = hfit.Fit(f, "SQR")  # S=return result, Q=quiet, R=use f's own range
     if int(fit_result) != 0:
         return None, f
     ndf = f.GetNDF()
@@ -85,6 +100,9 @@ def fit_landau(hist, fit_lo, fit_hi):
         sigma=f.GetParameter(2), sigma_err=f.GetParError(2),
         chi2_ndf=(f.GetChisquare() / ndf) if ndf > 0 else float("nan"),
     )
+    # attach the fit to the actual (fine-binned) histogram too, purely so it
+    # gets saved to the output ROOT file alongside it
+    hist.GetListOfFunctions().Add(f)
     return params, f
 
 
@@ -159,19 +177,24 @@ def main():
         # extends out to 100-250pC in rare high-energy events. 0-60pC
         # captures 97-99% of events for every channel, a much better balance
         # of "see the real tail" vs "don't squash the peak into a sliver."
-        # 60 bins (1pC each) keeps roughly the same resolution as before in
-        # the peak region; the sparse far tail will look noisier than the
-        # peak no matter the binning, since that's a real statistics limit,
-        # not a binning choice.
-        book_h1(f"ch{ch}_peak_mv_all", (100, 0.0, 500.0), f"ch{ch}_peak_mv")
-        book_h1(f"ch{ch}_integral_pC_all", (60, 0.0, 60.0), f"ch{ch}_integral_pC")
+        #
+        # Display binning is now much finer than the fit binning (see
+        # FIT_REBIN below and fit_landau()) -- fine bins make the plot show
+        # more real structure, but fitting a Landau directly against bins
+        # this fine would mean very few events per bin (more Poisson noise
+        # per bin, some near-empty bins), which destabilizes the fit and
+        # inflates chi2/ndf for reasons that have nothing to do with the
+        # physics. So the histograms you see are fine-grained, but
+        # fit_landau() internally works off a coarser rebinned copy.
+        book_h1(f"ch{ch}_peak_mv_all", (500, 0.0, 500.0), f"ch{ch}_peak_mv")
+        book_h1(f"ch{ch}_integral_pC_all", (300, 0.0, 60.0), f"ch{ch}_integral_pC")
 
         if ch != trigger_ch:
             # "no real hit" events are mostly noise clustered near 0 -- filtering
             # them out is what actually makes the physical pulse population visible
             hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
-            book_h1(f"ch{ch}_peak_mv_hit", (100, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
-            book_h1(f"ch{ch}_integral_pC_hit", (60, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
+            book_h1(f"ch{ch}_peak_mv_hit", (500, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
+            book_h1(f"ch{ch}_integral_pC_hit", (300, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
 
     # timing offset of each outer channel's peak relative to the trigger channel,
     # in real nanoseconds (not raw sample counts): "_all" = every trigger
@@ -179,19 +202,12 @@ def main():
     # clearing the hit threshold (the real coincidence timing)
     for ch in outer:
         df = df.Define(f"ch{ch}_dt_ns", f"(ch{ch}_peak_idx - ch{trigger_ch}_peak_idx) * {xincr_ns}")
-        book_h1(f"ch{ch}_dt_ns_all", (100, -40.0, 40.0), f"ch{ch}_dt_ns")
+        book_h1(f"ch{ch}_dt_ns_all", (400, -40.0, 40.0), f"ch{ch}_dt_ns")
 
         hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
-        book_h1(f"ch{ch}_dt_ns_hit", (100, -40.0, 40.0), f"ch{ch}_dt_ns", node=hit_node)
+        book_h1(f"ch{ch}_dt_ns_hit", (400, -40.0, 40.0), f"ch{ch}_dt_ns", node=hit_node)
 
     ROOT.RDF.RunGraphs(actions)
-
-    out_root = os.path.join(outdir, "analysis.root")
-    tf = ROOT.TFile(out_root, "RECREATE")
-    for name, h in h1.items():
-        h.GetPtr().Write(name)
-    tf.Close()
-    print(f"Wrote histograms to {out_root}")
 
     # ── plots ──────────────────────────────────────────────────────────────
     landau_fits = {}
@@ -212,8 +228,12 @@ def main():
             extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
         if ch != trigger_ch:
+            # integral_pC_hit is booked at 0.2pC/bin (300 bins over 60pC) for
+            # a fine-grained plot; rebin_factor=5 merges that back to 1pC/bin
+            # for the fit itself, which is the bin width we already confirmed
+            # gives stable chi2/ndf around 1 for this amount of statistics.
             fit_params, fit_func = fit_landau(h1[f"ch{ch}_integral_pC_hit"].GetPtr(),
-                                               fit_lo=2.0, fit_hi=40.0)
+                                               fit_lo=2.0, fit_hi=40.0, rebin_factor=5)
             landau_fits[ch] = fit_params
             if fit_params:
                 annotation = (f"Landau fit: MPV = {fit_params['mpv']:.2f} #pm {fit_params['mpv_err']:.2f} pC\n"
@@ -286,6 +306,17 @@ def main():
     )
 
     print(f"Wrote plots to {outdir}")
+
+    # Written AFTER fitting (not before, like it used to be) so the fitted
+    # Landau curves are actually attached to their histograms and saved --
+    # previously the file was written before any fit ran, so analysis.root
+    # only ever contained raw histograms with no fit results retrievable.
+    out_root = os.path.join(outdir, "analysis.root")
+    tf = ROOT.TFile(out_root, "RECREATE")
+    for name, h in h1.items():
+        h.GetPtr().Write(name)
+    tf.Close()
+    print(f"Wrote histograms (with fit results attached) to {out_root}")
 
     print()
     print("=== Landau fit MPV per channel (calibration reference point) ===")
