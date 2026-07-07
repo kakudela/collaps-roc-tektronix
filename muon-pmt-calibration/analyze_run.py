@@ -7,6 +7,7 @@ copied over from the DAQ laptop. Computes, per channel, per event:
                 picocoulombs assuming 50-ohm termination)
   - peak       (pulse depth in mV, baseline minus the minimum sample)
   - peak_idx   (which sample the pulse peaks at -- used for timing)
+  - n_outer_hit (0-4: how many of the outer PMTs registered a real hit)
 
 A trigger firing on CH1 does not mean every outer PMT saw a real hit that
 event -- most of the time only some of them did, the rest just show baseline
@@ -15,6 +16,11 @@ noise. So integral/peak/timing are all booked twice:
   "_hit" -- only events where that channel's peak clears --hit-threshold-mv
 The "_hit" versions are the physically meaningful ones.
 
+Every run also prints (and saves to summary.txt) a full report: metadata,
+trigger rate, per-channel hit fractions, outer-PMT multiplicity breakdown
+(including the CH1-fired-but-nothing-else-confirmed "background candidate"
+rate), timing offsets, and Landau fit results.
+
 Run on a machine with PyROOT (e.g. submit):
     python3 analyze_run.py /path/to/run_20260706_172716
 """
@@ -22,6 +28,7 @@ import argparse
 import glob
 import json
 import os
+from datetime import datetime
 
 import ROOT
 
@@ -135,6 +142,13 @@ def main():
         ROOT.ROOT.EnableImplicitMT(args.threads)
 
     run_dir = args.run_dir.rstrip("/")
+    run_label = os.path.basename(run_dir)
+
+    report = []
+
+    def log(line=""):
+        print(line)
+        report.append(line)
 
     meta = json.load(open(os.path.join(run_dir, "metadata.json")))
     trigger_ch = int(meta["trigger"]["source"].replace("CH", ""))
@@ -150,17 +164,47 @@ def main():
     plot_utils.ensure_index_php(run_dir, args.index_php_source)
     plot_utils.ensure_index_php(outdir, args.index_php_source)
 
+    log("=" * 72)
+    log("COLLAPS ROC Muon DAQ -- analysis report")
+    log(f"Run: {run_label}")
+    log(f"Generated: {datetime.now().isoformat(timespec='seconds')}")
+    log("=" * 72)
+    log()
+    log("--- Scope settings (from metadata.json) ---")
+    log(f"Instrument: {meta.get('idn', '?')}")
+    log(f"Sample rate: {meta.get('sample_rate_hz', 0) / 1e9:.2f} GS/s")
+    log(f"Record length: {meta.get('record_length', '?')} samples")
+    trig = meta.get("trigger", {})
+    log(f"Trigger: {trig.get('source')}, {trig.get('slope')} edge, "
+        f"level = {trig.get('level_v', 0) * 1000:.1f} mV, mode = {trig.get('mode')}")
+    for ch in channels:
+        cm = meta["channels"][str(ch)]
+        role = "trigger PMT" if ch == trigger_ch else "outer PMT"
+        log(f"  CH{ch} ({role}): {cm['scale_v_div'] * 1000:.0f} mV/div, "
+            f"{cm['termination_ohm']:.0f} ohm, BW = {cm['bandwidth_hz'] / 1e9:.2f} GHz, "
+            f"coupling = {cm['coupling']}")
+    log()
+    log(f"Analysis settings: hit threshold = {args.hit_threshold_mv:.0f} mV peak, "
+        f"baseline = first {args.baseline_samples} samples, termination = {args.termination_ohm:.0f} ohm")
+    log()
+
     df = ROOT.RDataFrame("events", files)
     n_events = df.Count().GetValue()
-    print(f"Loaded {len(files)} files, {n_events} events, channels {channels}, trigger=CH{trigger_ch}")
+    log(f"Files: {len(files)} batch files, {n_events} total events, "
+        f"channels {channels}, trigger = CH{trigger_ch}")
+    log()
 
     h1 = {}
     actions = []
+    plot_descriptions = []
 
     def book_h1(name, bins, col, node=None):
         src = node if node is not None else df
         h1[name] = src.Histo1D((name, "", bins[0], bins[1], bins[2]), col)
         actions.append(h1[name])
+
+    def add_plot(name, desc):
+        plot_descriptions.append((name, desc))
 
     thr = args.hit_threshold_mv
 
@@ -183,27 +227,23 @@ def main():
         # detector's earlier test data -- widen/rebin once you've looked at
         # the actual histograms for your real run.
         #
-        # integral_pC range was previously 0-20pC, which silently cut off
-        # 18-33% of events per channel (worst for CH5) -- the real tail
-        # extends out to 100-250pC in rare high-energy events. 0-60pC
-        # captures 97-99% of events for every channel, a much better balance
-        # of "see the real tail" vs "don't squash the peak into a sliver."
+        # integral_pC range is 0-60pC: 0-20pC silently cut off 18-33% of
+        # events per channel (worst for CH5) -- the real tail extends out to
+        # 100-250pC in rare high-energy events. 0-60pC captures 97-99%.
         #
-        # Display binning is now much finer than the fit binning (see
-        # FIT_REBIN below and fit_landau()) -- fine bins make the plot show
-        # more real structure, but fitting a Landau directly against bins
-        # this fine would mean very few events per bin (more Poisson noise
-        # per bin, some near-empty bins), which destabilizes the fit and
-        # inflates chi2/ndf for reasons that have nothing to do with the
-        # physics. So the histograms you see are fine-grained, but
-        # fit_landau() internally works off a coarser rebinned copy.
+        # Display binning is much finer than the fit binning -- fine bins
+        # make the plot show more real structure, but fitting a Landau
+        # directly against bins this fine would mean very few events per
+        # bin, which destabilizes the fit. fit_landau() works off a coarser
+        # rebinned copy internally, decoupled from the display binning.
         book_h1(f"ch{ch}_peak_mv_all", (500, 0.0, 500.0), f"ch{ch}_peak_mv")
         book_h1(f"ch{ch}_integral_pC_all", (120, 0.0, 60.0), f"ch{ch}_integral_pC")
 
         if ch != trigger_ch:
+            df = df.Define(f"ch{ch}_is_hit", f"ch{ch}_peak_mv > {thr}")
             # "no real hit" events are mostly noise clustered near 0 -- filtering
             # them out is what actually makes the physical pulse population visible
-            hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
+            hit_node = df.Filter(f"ch{ch}_is_hit")
             book_h1(f"ch{ch}_peak_mv_hit", (500, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
             book_h1(f"ch{ch}_integral_pC_hit", (120, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
 
@@ -215,10 +255,23 @@ def main():
         df = df.Define(f"ch{ch}_dt_ns", f"(ch{ch}_peak_idx - ch{trigger_ch}_peak_idx) * {xincr_ns}")
         book_h1(f"ch{ch}_dt_ns_all", (400, -40.0, 40.0), f"ch{ch}_dt_ns")
 
-        hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
+        hit_node = df.Filter(f"ch{ch}_is_hit")
         book_h1(f"ch{ch}_dt_ns_hit", (400, -40.0, 40.0), f"ch{ch}_dt_ns", node=hit_node)
 
+    # multiplicity: how many of the 4 outer PMTs registered a real hit this
+    # event. 0 = CH1 fired but nothing confirms a particle reached the outer
+    # scintillator too (background candidate); 4 = likely a through-going muon.
+    df = df.Define("n_outer_hit", " + ".join(f"(int)ch{ch}_is_hit" for ch in outer))
+    book_h1("n_outer_hit", (5, -0.5, 4.5), "n_outer_hit")
+
+    # run duration, from the (repeated-per-event) batch timing columns
+    df = df.Define("batch_end_unix", "batch_start_unix + duration_s")
+    t_start_action = df.Min("batch_start_unix")
+    t_end_action = df.Max("batch_end_unix")
+    actions += [t_start_action, t_end_action]
+
     ROOT.RDF.RunGraphs(actions)
+    duration_s = t_end_action.GetValue() - t_start_action.GetValue()
 
     # ── plots ──────────────────────────────────────────────────────────────
     landau_fits = {}
@@ -231,6 +284,8 @@ def main():
             y_title="events / bin",
             extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
+        add_plot(f"ch{ch}_integral_pC_all",
+                 f"CH{ch} ({role}) charge integral, every trigger (noise-dominated for outer channels)")
         plot_utils.plot_hist_1d(
             h1[f"ch{ch}_peak_mv_all"].GetPtr(),
             os.path.join(outdir, f"ch{ch}_peak_mv_all"),
@@ -238,6 +293,8 @@ def main():
             y_title="events / bin",
             extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
+        add_plot(f"ch{ch}_peak_mv_all",
+                 f"CH{ch} ({role}) pulse depth (mV), every trigger")
         if ch != trigger_ch:
             # integral_pC_hit is booked at 0.5pC/bin (120 bins over 60pC) for
             # a fine-grained plot; rebin_factor=2 merges that back to 1pC/bin
@@ -260,6 +317,10 @@ def main():
                 fit_func=fit_func,
                 annotation=annotation,
             )
+            add_plot(f"ch{ch}_integral_pC_hit",
+                     f"CH{ch} charge integral, hit-filtered (real coincidences only), with Landau fit overlaid "
+                     f"-- MPV = {landau_fits[ch]['mpv']:.2f}pC is the calibration reference for this channel"
+                     if landau_fits[ch] else f"CH{ch} charge integral, hit-filtered -- fit did not converge")
             plot_utils.plot_hist_1d(
                 h1[f"ch{ch}_peak_mv_hit"].GetPtr(),
                 os.path.join(outdir, f"ch{ch}_peak_mv_hit"),
@@ -267,6 +328,7 @@ def main():
                 y_title="events / bin",
                 extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
             )
+            add_plot(f"ch{ch}_peak_mv_hit", f"CH{ch} pulse depth, hit-filtered")
 
     # overlay of all outer-PMT integrals (hit-filtered), for a direct by-eye comparison
     plot_utils.plot_hists_1d(
@@ -278,6 +340,8 @@ def main():
         extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
         canvas_size=(1000, 800),
     )
+    add_plot("outer_pmts_integral_pC_overlay",
+             "All 4 outer PMTs' hit-filtered charge integrals overlaid -- compare peak locations directly")
 
     for ch in outer:
         plot_utils.plot_hist_1d(
@@ -287,6 +351,7 @@ def main():
             y_title="events / bin",
             extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
+        add_plot(f"ch{ch}_dt_ns_all", f"CH{ch} timing relative to trigger, every trigger (noisy pedestal expected)")
         plot_utils.plot_hist_1d(
             h1[f"ch{ch}_dt_ns_hit"].GetPtr(),
             os.path.join(outdir, f"ch{ch}_dt_ns_hit"),
@@ -294,6 +359,7 @@ def main():
             y_title="events / bin",
             extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
         )
+        add_plot(f"ch{ch}_dt_ns_hit", f"CH{ch} timing relative to trigger, hit-filtered -- should be a tight peak for a real coincidence")
 
     # CH2-5 timing overlays, both the "all triggers" and "hit-filtered" views,
     # on a bigger canvas so the 4-entry legend has room to breathe
@@ -306,6 +372,7 @@ def main():
         extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         canvas_size=(1000, 800),
     )
+    add_plot("outer_pmts_dt_ns_all_overlay", "All 4 outer PMTs' timing overlaid, every trigger")
     plot_utils.plot_hists_1d(
         [h1[f"ch{ch}_dt_ns_hit"].GetPtr() for ch in outer],
         [f"CH{ch}" for ch in outer],
@@ -315,13 +382,28 @@ def main():
         extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
         canvas_size=(1000, 800),
     )
+    add_plot("outer_pmts_dt_ns_hit_overlay",
+             "All 4 outer PMTs' timing overlaid, hit-filtered -- main plot for spotting per-channel cable/timing offsets")
+
+    # outer-PMT hit multiplicity: the visual answer to "how much of the
+    # trigger rate is real coincidences vs unconfirmed background"
+    plot_utils.plot_hist_1d(
+        h1["n_outer_hit"].GetPtr(),
+        os.path.join(outdir, "n_outer_hit_multiplicity"),
+        x_title="number of outer PMTs with a real hit (0-4)",
+        y_title="events",
+        extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
+    )
+    add_plot("n_outer_hit_multiplicity",
+             "How many of CH2-5 registered a real hit per trigger. 0 = CH1 fired but nothing confirmed "
+             "elsewhere (background candidate); 4 = likely a through-going muon lighting up the whole outer scintillator")
 
     print(f"Wrote plots to {outdir}")
 
-    # Written AFTER fitting (not before, like it used to be) so the fitted
-    # Landau curves are actually attached to their histograms and saved --
-    # previously the file was written before any fit ran, so analysis.root
-    # only ever contained raw histograms with no fit results retrievable.
+    # Written AFTER fitting (not before) so the fitted Landau curves are
+    # actually attached to their histograms and saved -- previously the file
+    # was written before any fit ran, so analysis.root only ever contained
+    # raw histograms with no fit results retrievable.
     out_root = os.path.join(outdir, "analysis.root")
     tf = ROOT.TFile(out_root, "RECREATE")
     for name, h in h1.items():
@@ -329,16 +411,58 @@ def main():
     tf.Close()
     print(f"Wrote histograms (with fit results attached) to {out_root}")
 
-    print()
-    print("=== Landau fit MPV per channel (calibration reference point) ===")
+    # ── report: trigger rate, hit fractions, multiplicity/background, timing, fits ──
+    log()
+    log("--- Trigger rate ---")
+    log(f"Run duration: {duration_s:.1f} s ({duration_s / 60:.1f} min)")
+    log(f"Overall trigger rate (CH{trigger_ch}): {n_events / duration_s:.2f} Hz")
+    log()
+
+    log(f"--- Outer-PMT hit fractions (peak > {thr:.0f}mV) ---")
+    for ch in outer:
+        n_hit = h1[f"ch{ch}_integral_pC_hit"].GetPtr().GetEntries()
+        log(f"CH{ch}: {int(n_hit)}/{n_events} = {100 * n_hit / n_events:.1f}%  ({n_hit / duration_s:.2f} Hz)")
+    log()
+
+    log("--- Outer-PMT hit multiplicity (how many of CH2-5 fired together) ---")
+    hmult = h1["n_outer_hit"].GetPtr()
+    for n in range(5):
+        c = hmult.GetBinContent(n + 1)
+        log(f"  {n} outer PMTs hit: {int(c):5d}  ({100 * c / n_events:5.1f}%,  {c / duration_s:.2f} Hz)")
+    n_zero = hmult.GetBinContent(1)
+    log()
+    log(f"*** Background-candidate rate (CH{trigger_ch} fired, 0 outer PMTs confirmed): "
+        f"{n_zero / duration_s:.2f} Hz ***")
+    log()
+
+    log("--- Timing offsets (hit-filtered, real coincidences only) ---")
+    for ch in outer:
+        h = h1[f"ch{ch}_dt_ns_hit"].GetPtr()
+        log(f"CH{ch}: mean dt = {h.GetMean():6.2f} ns   RMS = {h.GetRMS():.2f} ns   (n = {int(h.GetEntries())})")
+    log()
+
+    log("--- Landau fit: charge-integral MPV per channel (calibration reference point) ---")
     for ch in outer:
         p = landau_fits.get(ch)
         if p:
-            print(f"CH{ch}: MPV = {p['mpv']:.2f} +/- {p['mpv_err']:.2f} pC   "
-                  f"sigma = {p['sigma']:.2f} +/- {p['sigma_err']:.2f} pC   "
-                  f"chi2/ndf = {p['chi2_ndf']:.2f}")
+            log(f"CH{ch}: MPV = {p['mpv']:.2f} +/- {p['mpv_err']:.2f} pC   "
+                f"sigma = {p['sigma']:.2f} +/- {p['sigma_err']:.2f} pC   "
+                f"chi2/ndf = {p['chi2_ndf']:.2f}")
         else:
-            print(f"CH{ch}: fit did not converge")
+            log(f"CH{ch}: fit did not converge")
+    log()
+
+    log("--- Plots produced (each as .png and .pdf) ---")
+    for name, desc in plot_descriptions:
+        log(f"{name}: {desc}")
+    log()
+    log(f"Full raw scope settings: {os.path.join(run_dir, 'metadata.json')}")
+    log(f"All histograms + fit objects: {out_root}")
+
+    summary_path = os.path.join(outdir, "summary.txt")
+    with open(summary_path, "w") as fh:
+        fh.write("\n".join(report) + "\n")
+    print(f"\nWrote full report to {summary_path}")
 
 
 if __name__ == "__main__":
