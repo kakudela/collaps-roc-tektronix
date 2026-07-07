@@ -8,8 +8,13 @@ copied over from the DAQ laptop. Computes, per channel, per event:
   - peak       (pulse depth in mV, baseline minus the minimum sample)
   - peak_idx   (which sample the pulse peaks at -- used for timing)
 
+Timing (dt_samples) is booked twice per outer channel: "_all" (every trigger,
+including ones where that channel saw no real hit -- mostly noise, washed
+out) and "_hit" (only events where that channel's peak clears
+--hit-threshold-mv -- the genuine-coincidence timing plot you actually want).
+
 Run on a machine with PyROOT (e.g. submit):
-    python3 analyze_run.py /path/to/run_20260706_172716 --outdir ~/public_html/.../run_20260706_172716
+    python3 analyze_run.py /path/to/run_20260706_172716
 """
 import argparse
 import glob
@@ -18,8 +23,9 @@ import os
 
 import ROOT
 
+import plot_utils
+
 ROOT.gROOT.SetBatch(True)
-ROOT.gStyle.SetOptStat(1110)
 
 ROOT.gInterpreter.Declare(r"""
 #include "ROOT/RVec.hxx"
@@ -51,6 +57,8 @@ int waveform_peak_index(const RVec<Short_t>& wf) {
 }
 """)
 
+DEFAULT_INDEX_PHP = os.path.expanduser("~/public_html/fccee/beam_background/index.php")
+
 
 def main():
     ap = argparse.ArgumentParser(description="Analyze one run of MSO46 scope data with RDataFrame")
@@ -58,23 +66,32 @@ def main():
     ap.add_argument("--baseline-samples", type=int, default=50,
                      help="how many samples at the start of the window to average for baseline")
     ap.add_argument("--termination-ohm", type=float, default=50.0)
+    ap.add_argument("--hit-threshold-mv", type=float, default=15.0,
+                     help="min peak depth (mV) for a channel to count as a real hit, used for the timing plots")
     ap.add_argument("--outdir", default=None, help="defaults to <run_dir>/analysis")
+    ap.add_argument("--index-php-source", default=DEFAULT_INDEX_PHP,
+                     help="index.php copied into every directory this script creates, for public_html browsing")
     ap.add_argument("--threads", type=int, default=4)
     args = ap.parse_args()
 
     if args.threads > 0:
         ROOT.ROOT.EnableImplicitMT(args.threads)
 
-    meta = json.load(open(os.path.join(args.run_dir, "metadata.json")))
+    run_dir = args.run_dir.rstrip("/")
+    run_label = os.path.basename(run_dir)
+
+    meta = json.load(open(os.path.join(run_dir, "metadata.json")))
     trigger_ch = int(meta["trigger"]["source"].replace("CH", ""))
     channels = sorted(int(ch) for ch in meta["channels"].keys())
+    outer = [c for c in channels if c != trigger_ch]
 
-    files = sorted(glob.glob(os.path.join(args.run_dir, "batch*.root")))
+    files = sorted(glob.glob(os.path.join(run_dir, "batch*.root")))
     if not files:
-        raise SystemExit(f"no batch*.root files found in {args.run_dir}")
+        raise SystemExit(f"no batch*.root files found in {run_dir}")
 
-    outdir = args.outdir or os.path.join(args.run_dir, "analysis")
-    os.makedirs(outdir, exist_ok=True)
+    outdir = args.outdir or os.path.join(run_dir, "analysis")
+    plot_utils.ensure_index_php(run_dir, args.index_php_source)
+    plot_utils.ensure_index_php(outdir, args.index_php_source)
 
     df = ROOT.RDataFrame("events", files)
     n_events = df.Count().GetValue()
@@ -84,8 +101,9 @@ def main():
     h2 = {}
     actions = []
 
-    def book_h1(name, bins, col):
-        h1[name] = df.Histo1D((name, "", bins[0], bins[1], bins[2]), col)
+    def book_h1(name, bins, col, node=None):
+        src = node if node is not None else df
+        h1[name] = src.Histo1D((name, "", bins[0], bins[1], bins[2]), col)
         actions.append(h1[name])
 
     for ch in channels:
@@ -110,16 +128,18 @@ def main():
         book_h1(f"ch{ch}_peak_mv", (200, 0.0, 500.0), f"ch{ch}_peak_mv")
         book_h1(f"ch{ch}_integral_pC", (200, 0.0, 20.0), f"ch{ch}_integral_pC")
 
-    # timing offset of each channel's peak relative to the trigger channel
-    for ch in channels:
-        if ch == trigger_ch:
-            continue
+    # timing offset of each outer channel's peak relative to the trigger channel:
+    # "_all" = every trigger (mostly noise for channels with no real hit),
+    # "_hit" = only events clearing the hit threshold (the real coincidence timing)
+    for ch in outer:
         df = df.Define(f"ch{ch}_dt_samples", f"ch{ch}_peak_idx - ch{trigger_ch}_peak_idx")
-        book_h1(f"ch{ch}_dt_samples", (200, -500, 500), f"ch{ch}_dt_samples")
+        book_h1(f"ch{ch}_dt_samples_all", (200, -500, 500), f"ch{ch}_dt_samples")
+
+        hit_node = df.Filter(f"ch{ch}_peak_mv > {args.hit_threshold_mv}")
+        book_h1(f"ch{ch}_dt_samples_hit", (200, -500, 500), f"ch{ch}_dt_samples", node=hit_node)
 
     # 2D correlations between outer-PMT integrals (do channels covering
     # overlapping geometry see correlated energy deposits?)
-    outer = [c for c in channels if c != trigger_ch]
     for i in range(len(outer)):
         for j in range(i + 1, len(outer)):
             a, b = outer[i], outer[j]
@@ -137,20 +157,66 @@ def main():
     tf.Close()
     print(f"Wrote histograms to {out_root}")
 
-    # quick PNGs for the plots you actually care about first
+    # ── plots ──────────────────────────────────────────────────────────────
     for ch in channels:
-        c = ROOT.TCanvas(f"c_integral_{ch}", "", 800, 600)
-        h1[f"ch{ch}_integral_pC"].GetPtr().Draw()
-        c.SaveAs(os.path.join(outdir, f"ch{ch}_integral_pC.png"))
+        role = "trigger PMT" if ch == trigger_ch else "outer PMT"
+        plot_utils.plot_hist_1d(
+            h1[f"ch{ch}_integral_pC"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_integral_pC"),
+            run_label,
+            x_title=f"CH{ch} ({role}) charge integral [pC]",
+            y_title="events",
+        )
+        plot_utils.plot_hist_1d(
+            h1[f"ch{ch}_peak_mv"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_peak_mv"),
+            run_label,
+            x_title=f"CH{ch} ({role}) pulse depth [mV]",
+            y_title="events",
+        )
 
-    for ch in channels:
-        if ch == trigger_ch:
-            continue
-        c = ROOT.TCanvas(f"c_dt_{ch}", "", 800, 600)
-        h1[f"ch{ch}_dt_samples"].GetPtr().Draw()
-        c.SaveAs(os.path.join(outdir, f"ch{ch}_dt_samples.png"))
+    # overlay of all outer-PMT integrals, for a direct by-eye comparison
+    plot_utils.plot_hists_1d(
+        [h1[f"ch{ch}_integral_pC"].GetPtr() for ch in outer],
+        [f"CH{ch}" for ch in outer],
+        os.path.join(outdir, "outer_pmts_integral_pC_overlay"),
+        run_label,
+        x_title="charge integral [pC]",
+        y_title="events",
+    )
 
-    print(f"Wrote PNGs to {outdir}")
+    for ch in outer:
+        plot_utils.plot_hist_1d(
+            h1[f"ch{ch}_dt_samples_all"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_dt_samples_all"),
+            run_label,
+            x_title=f"CH{ch} peak time - CH{trigger_ch} peak time [samples, 1 = 80ps]",
+            y_title="events",
+            extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
+        )
+        plot_utils.plot_hist_1d(
+            h1[f"ch{ch}_dt_samples_hit"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_dt_samples_hit"),
+            run_label,
+            x_title=f"CH{ch} peak time - CH{trigger_ch} peak time [samples, 1 = 80ps]",
+            y_title="events",
+            extra_left=plot_utils.HEADER_LEFT + f" -- peak > {args.hit_threshold_mv:.0f}mV",
+        )
+
+    for i in range(len(outer)):
+        for j in range(i + 1, len(outer)):
+            a, b = outer[i], outer[j]
+            name = f"ch{a}_vs_ch{b}_integral_pC"
+            plot_utils.plot_hist_2d(
+                h2[name].GetPtr(),
+                os.path.join(outdir, name),
+                run_label,
+                x_title=f"CH{a} integral [pC]",
+                y_title=f"CH{b} integral [pC]",
+                z_title="events",
+            )
+
+    print(f"Wrote plots to {outdir}")
 
 
 if __name__ == "__main__":
