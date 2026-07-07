@@ -198,6 +198,7 @@ def main():
         x_title="charge integral [pC]",
         y_title="events / bin",
         extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+        canvas_size=(1000, 800),
     )
 
     for ch in outer:
@@ -215,6 +216,27 @@ def main():
             y_title="events / bin",
             extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
         )
+
+    # CH2-5 timing overlays, both the "all triggers" and "hit-filtered" views,
+    # on a bigger canvas so the 4-entry legend has room to breathe
+    plot_utils.plot_hists_1d(
+        [h1[f"ch{ch}_dt_ns_all"].GetPtr() for ch in outer],
+        [f"CH{ch}" for ch in outer],
+        os.path.join(outdir, "outer_pmts_dt_ns_all_overlay"),
+        x_title=f"time of outer-PMT peak minus time of CH{trigger_ch} peak [ns]",
+        y_title="events / bin",
+        extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
+        canvas_size=(1000, 800),
+    )
+    plot_utils.plot_hists_1d(
+        [h1[f"ch{ch}_dt_ns_hit"].GetPtr() for ch in outer],
+        [f"CH{ch}" for ch in outer],
+        os.path.join(outdir, "outer_pmts_dt_ns_hit_overlay"),
+        x_title=f"time of outer-PMT peak minus time of CH{trigger_ch} peak [ns]",
+        y_title="events / bin",
+        extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+        canvas_size=(1000, 800),
+    )
 
     print(f"Wrote plots to {outdir}")
 
