@@ -127,15 +127,15 @@ def main():
         # NOTE: bin ranges below are rough starting guesses based on this
         # detector's earlier test data -- widen/rebin once you've looked at
         # the actual histograms for your real run.
-        book_h1(f"ch{ch}_peak_mv_all", (200, 0.0, 500.0), f"ch{ch}_peak_mv")
-        book_h1(f"ch{ch}_integral_pC_all", (200, 0.0, 20.0), f"ch{ch}_integral_pC")
+        book_h1(f"ch{ch}_peak_mv_all", (100, 0.0, 500.0), f"ch{ch}_peak_mv")
+        book_h1(f"ch{ch}_integral_pC_all", (100, 0.0, 20.0), f"ch{ch}_integral_pC")
 
         if ch != trigger_ch:
             # "no real hit" events are mostly noise clustered near 0 -- filtering
             # them out is what actually makes the physical pulse population visible
             hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
-            book_h1(f"ch{ch}_peak_mv_hit", (200, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
-            book_h1(f"ch{ch}_integral_pC_hit", (200, 0.0, 20.0), f"ch{ch}_integral_pC", node=hit_node)
+            book_h1(f"ch{ch}_peak_mv_hit", (100, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
+            book_h1(f"ch{ch}_integral_pC_hit", (100, 0.0, 20.0), f"ch{ch}_integral_pC", node=hit_node)
 
     # timing offset of each outer channel's peak relative to the trigger channel,
     # in real nanoseconds (not raw sample counts): "_all" = every trigger
@@ -143,10 +143,10 @@ def main():
     # clearing the hit threshold (the real coincidence timing)
     for ch in outer:
         df = df.Define(f"ch{ch}_dt_ns", f"(ch{ch}_peak_idx - ch{trigger_ch}_peak_idx) * {xincr_ns}")
-        book_h1(f"ch{ch}_dt_ns_all", (200, -40.0, 40.0), f"ch{ch}_dt_ns")
+        book_h1(f"ch{ch}_dt_ns_all", (100, -40.0, 40.0), f"ch{ch}_dt_ns")
 
         hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
-        book_h1(f"ch{ch}_dt_ns_hit", (200, -40.0, 40.0), f"ch{ch}_dt_ns", node=hit_node)
+        book_h1(f"ch{ch}_dt_ns_hit", (100, -40.0, 40.0), f"ch{ch}_dt_ns", node=hit_node)
 
     ROOT.RDF.RunGraphs(actions)
 
