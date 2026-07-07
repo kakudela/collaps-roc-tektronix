@@ -1,0 +1,6 @@
+pyvisa
+pyvisa-py
+pyusb
+numpy
+uproot
+awkward
