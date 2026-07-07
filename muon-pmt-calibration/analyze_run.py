@@ -225,7 +225,7 @@ def main():
                 os.path.join(outdir, f"ch{ch}_integral_pC_hit"),
                 x_title=f"CH{ch} ({role}) charge integral [pC]",
                 y_title="events / bin",
-                extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+                extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
                 fit_func=fit_func,
                 annotation=annotation,
             )
@@ -234,7 +234,7 @@ def main():
                 os.path.join(outdir, f"ch{ch}_peak_mv_hit"),
                 x_title=f"CH{ch} ({role}) pulse depth [mV]",
                 y_title="events / bin",
-                extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+                extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
             )
 
     # overlay of all outer-PMT integrals (hit-filtered), for a direct by-eye comparison
@@ -244,7 +244,7 @@ def main():
         os.path.join(outdir, "outer_pmts_integral_pC_overlay"),
         x_title="charge integral [pC]",
         y_title="events / bin",
-        extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+        extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
         canvas_size=(1000, 800),
     )
 
@@ -261,7 +261,7 @@ def main():
             os.path.join(outdir, f"ch{ch}_dt_ns_hit"),
             x_title=f"time of CH{ch} peak minus time of CH{trigger_ch} peak [ns]",
             y_title="events / bin",
-            extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+            extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
         )
 
     # CH2-5 timing overlays, both the "all triggers" and "hit-filtered" views,
@@ -281,7 +281,7 @@ def main():
         os.path.join(outdir, "outer_pmts_dt_ns_hit_overlay"),
         x_title=f"time of outer-PMT peak minus time of CH{trigger_ch} peak [ns]",
         y_title="events / bin",
-        extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+        extra_left=plot_utils.HEADER_LEFT + f" peak > {thr:.0f}mV",
         canvas_size=(1000, 800),
     )
 
