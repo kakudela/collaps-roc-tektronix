@@ -128,21 +128,24 @@ def main():
         # detector's earlier test data -- widen/rebin once you've looked at
         # the actual histograms for your real run.
         #
-        # integral_pC uses far fewer bins than peak_mv/dt_ns on purpose: with
-        # only ~1000 hit-filtered events, 100 bins over a 20pC range averages
-        # ~10 entries/bin, which is dominated by Poisson noise and hides the
-        # real peak-and-tail (Landau) shape underneath. 40 bins (~0.5pC each,
-        # ~25 events/bin) is enough to see the shape without averaging away
-        # real structure. Revisit once you have a lot more statistics.
+        # integral_pC range was previously 0-20pC, which silently cut off
+        # 18-33% of events per channel (worst for CH5) -- the real tail
+        # extends out to 100-250pC in rare high-energy events. 0-60pC
+        # captures 97-99% of events for every channel, a much better balance
+        # of "see the real tail" vs "don't squash the peak into a sliver."
+        # 60 bins (1pC each) keeps roughly the same resolution as before in
+        # the peak region; the sparse far tail will look noisier than the
+        # peak no matter the binning, since that's a real statistics limit,
+        # not a binning choice.
         book_h1(f"ch{ch}_peak_mv_all", (100, 0.0, 500.0), f"ch{ch}_peak_mv")
-        book_h1(f"ch{ch}_integral_pC_all", (40, 0.0, 20.0), f"ch{ch}_integral_pC")
+        book_h1(f"ch{ch}_integral_pC_all", (60, 0.0, 60.0), f"ch{ch}_integral_pC")
 
         if ch != trigger_ch:
             # "no real hit" events are mostly noise clustered near 0 -- filtering
             # them out is what actually makes the physical pulse population visible
             hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
             book_h1(f"ch{ch}_peak_mv_hit", (100, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
-            book_h1(f"ch{ch}_integral_pC_hit", (40, 0.0, 20.0), f"ch{ch}_integral_pC", node=hit_node)
+            book_h1(f"ch{ch}_integral_pC_hit", (60, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
 
     # timing offset of each outer channel's peak relative to the trigger channel,
     # in real nanoseconds (not raw sample counts): "_all" = every trigger
