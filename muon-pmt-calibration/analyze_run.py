@@ -100,6 +100,17 @@ def fit_landau(hist, fit_lo, fit_hi, rebin_factor=1):
         sigma=f.GetParameter(2), sigma_err=f.GetParError(2),
         chi2_ndf=(f.GetChisquare() / ndf) if ndf > 0 else float("nan"),
     )
+
+    # The fit's height (param 0) was determined against hfit's wider bins,
+    # which each contain ~rebin_factor times more events than the original
+    # display histogram's bins. Drawing that curve as-is on top of the fine
+    # display histogram would overshoot by that same factor -- rescale it
+    # back down so the curve's height actually matches the bars it's drawn
+    # over. MPV and sigma (params 1, 2) describe the curve's x-axis shape,
+    # not its height, so they're untouched.
+    if rebin_factor > 1:
+        f.SetParameter(0, f.GetParameter(0) / rebin_factor)
+
     # attach the fit to the actual (fine-binned) histogram too, purely so it
     # gets saved to the output ROOT file alongside it
     hist.GetListOfFunctions().Add(f)
@@ -187,14 +198,14 @@ def main():
         # physics. So the histograms you see are fine-grained, but
         # fit_landau() internally works off a coarser rebinned copy.
         book_h1(f"ch{ch}_peak_mv_all", (500, 0.0, 500.0), f"ch{ch}_peak_mv")
-        book_h1(f"ch{ch}_integral_pC_all", (300, 0.0, 60.0), f"ch{ch}_integral_pC")
+        book_h1(f"ch{ch}_integral_pC_all", (120, 0.0, 60.0), f"ch{ch}_integral_pC")
 
         if ch != trigger_ch:
             # "no real hit" events are mostly noise clustered near 0 -- filtering
             # them out is what actually makes the physical pulse population visible
             hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
             book_h1(f"ch{ch}_peak_mv_hit", (500, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
-            book_h1(f"ch{ch}_integral_pC_hit", (300, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
+            book_h1(f"ch{ch}_integral_pC_hit", (120, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
 
     # timing offset of each outer channel's peak relative to the trigger channel,
     # in real nanoseconds (not raw sample counts): "_all" = every trigger
@@ -228,12 +239,12 @@ def main():
             extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
         if ch != trigger_ch:
-            # integral_pC_hit is booked at 0.2pC/bin (300 bins over 60pC) for
-            # a fine-grained plot; rebin_factor=5 merges that back to 1pC/bin
+            # integral_pC_hit is booked at 0.5pC/bin (120 bins over 60pC) for
+            # a fine-grained plot; rebin_factor=2 merges that back to 1pC/bin
             # for the fit itself, which is the bin width we already confirmed
             # gives stable chi2/ndf around 1 for this amount of statistics.
             fit_params, fit_func = fit_landau(h1[f"ch{ch}_integral_pC_hit"].GetPtr(),
-                                               fit_lo=2.0, fit_hi=40.0, rebin_factor=5)
+                                               fit_lo=2.0, fit_hi=40.0, rebin_factor=2)
             landau_fits[ch] = fit_params
             if fit_params:
                 annotation = (f"Landau fit: MPV = {fit_params['mpv']:.2f} #pm {fit_params['mpv_err']:.2f} pC\n"
