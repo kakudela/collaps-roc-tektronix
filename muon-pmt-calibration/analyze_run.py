@@ -8,10 +8,12 @@ copied over from the DAQ laptop. Computes, per channel, per event:
   - peak       (pulse depth in mV, baseline minus the minimum sample)
   - peak_idx   (which sample the pulse peaks at -- used for timing)
 
-Timing (dt_samples) is booked twice per outer channel: "_all" (every trigger,
-including ones where that channel saw no real hit -- mostly noise, washed
-out) and "_hit" (only events where that channel's peak clears
---hit-threshold-mv -- the genuine-coincidence timing plot you actually want).
+A trigger firing on CH1 does not mean every outer PMT saw a real hit that
+event -- most of the time only some of them did, the rest just show baseline
+noise. So integral/peak/timing are all booked twice:
+  "_all" -- every trigger, noise-dominated for channels with no real hit
+  "_hit" -- only events where that channel's peak clears --hit-threshold-mv
+The "_hit" versions are the physically meaningful ones.
 
 Run on a machine with PyROOT (e.g. submit):
     python3 analyze_run.py /path/to/run_20260706_172716
@@ -67,7 +69,7 @@ def main():
                      help="how many samples at the start of the window to average for baseline")
     ap.add_argument("--termination-ohm", type=float, default=50.0)
     ap.add_argument("--hit-threshold-mv", type=float, default=15.0,
-                     help="min peak depth (mV) for a channel to count as a real hit, used for the timing plots")
+                     help="min peak depth (mV) for a channel to count as a real hit that event")
     ap.add_argument("--outdir", default=None, help="defaults to <run_dir>/analysis")
     ap.add_argument("--index-php-source", default=DEFAULT_INDEX_PHP,
                      help="index.php copied into every directory this script creates, for public_html browsing")
@@ -78,12 +80,12 @@ def main():
         ROOT.ROOT.EnableImplicitMT(args.threads)
 
     run_dir = args.run_dir.rstrip("/")
-    run_label = os.path.basename(run_dir)
 
     meta = json.load(open(os.path.join(run_dir, "metadata.json")))
     trigger_ch = int(meta["trigger"]["source"].replace("CH", ""))
     channels = sorted(int(ch) for ch in meta["channels"].keys())
     outer = [c for c in channels if c != trigger_ch]
+    xincr_ns = meta["channels"][str(trigger_ch)]["xincr"] * 1.0e9  # shared timebase, ns/sample
 
     files = sorted(glob.glob(os.path.join(run_dir, "batch*.root")))
     if not files:
@@ -106,6 +108,8 @@ def main():
         h1[name] = src.Histo1D((name, "", bins[0], bins[1], bins[2]), col)
         actions.append(h1[name])
 
+    thr = args.hit_threshold_mv
+
     for ch in channels:
         cm = meta["channels"][str(ch)]
         ymult, xincr = cm["ymult"], cm["xincr"]
@@ -124,28 +128,39 @@ def main():
         # NOTE: bin ranges below are rough starting guesses based on this
         # detector's earlier test data -- widen/rebin once you've looked at
         # the actual histograms for your real run.
-        book_h1(f"ch{ch}_baseline_raw", (200, -2000, 2000), f"ch{ch}_baseline_raw")
-        book_h1(f"ch{ch}_peak_mv", (200, 0.0, 500.0), f"ch{ch}_peak_mv")
-        book_h1(f"ch{ch}_integral_pC", (200, 0.0, 20.0), f"ch{ch}_integral_pC")
+        book_h1(f"ch{ch}_peak_mv_all", (200, 0.0, 500.0), f"ch{ch}_peak_mv")
+        book_h1(f"ch{ch}_integral_pC_all", (200, 0.0, 20.0), f"ch{ch}_integral_pC")
 
-    # timing offset of each outer channel's peak relative to the trigger channel:
-    # "_all" = every trigger (mostly noise for channels with no real hit),
-    # "_hit" = only events clearing the hit threshold (the real coincidence timing)
+        if ch != trigger_ch:
+            # "no real hit" events are mostly noise clustered near 0 -- filtering
+            # them out is what actually makes the physical pulse population visible
+            hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
+            book_h1(f"ch{ch}_peak_mv_hit", (200, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
+            book_h1(f"ch{ch}_integral_pC_hit", (200, 0.0, 20.0), f"ch{ch}_integral_pC", node=hit_node)
+
+    # timing offset of each outer channel's peak relative to the trigger channel,
+    # in real nanoseconds (not raw sample counts): "_all" = every trigger
+    # (mostly noise for channels with no real hit), "_hit" = only events
+    # clearing the hit threshold (the real coincidence timing)
     for ch in outer:
-        df = df.Define(f"ch{ch}_dt_samples", f"ch{ch}_peak_idx - ch{trigger_ch}_peak_idx")
-        book_h1(f"ch{ch}_dt_samples_all", (200, -500, 500), f"ch{ch}_dt_samples")
+        df = df.Define(f"ch{ch}_dt_ns", f"(ch{ch}_peak_idx - ch{trigger_ch}_peak_idx) * {xincr_ns}")
+        book_h1(f"ch{ch}_dt_ns_all", (200, -40.0, 40.0), f"ch{ch}_dt_ns")
 
-        hit_node = df.Filter(f"ch{ch}_peak_mv > {args.hit_threshold_mv}")
-        book_h1(f"ch{ch}_dt_samples_hit", (200, -500, 500), f"ch{ch}_dt_samples", node=hit_node)
+        hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
+        book_h1(f"ch{ch}_dt_ns_hit", (200, -40.0, 40.0), f"ch{ch}_dt_ns", node=hit_node)
 
-    # 2D correlations between outer-PMT integrals (do channels covering
-    # overlapping geometry see correlated energy deposits?)
+    # 2D correlation between outer-PMT integrals, restricted to events where
+    # BOTH channels registered a real hit -- a genuine two-PMT coincidence.
+    # (Without this cut the plot is dominated by the "neither channel really
+    # fired" population sitting near zero on both axes, which swamps any
+    # real correlation.)
     for i in range(len(outer)):
         for j in range(i + 1, len(outer)):
             a, b = outer[i], outer[j]
-            name = f"ch{a}_vs_ch{b}_integral_pC"
-            h2[name] = df.Histo2D((name, "", 100, 0.0, 20.0, 100, 0.0, 20.0),
-                                   f"ch{a}_integral_pC", f"ch{b}_integral_pC")
+            name = f"ch{a}_vs_ch{b}_integral_pC_hit"
+            coinc_node = df.Filter(f"ch{a}_peak_mv > {thr} && ch{b}_peak_mv > {thr}")
+            h2[name] = coinc_node.Histo2D((name, "", 100, 0.0, 20.0, 100, 0.0, 20.0),
+                                           f"ch{a}_integral_pC", f"ch{b}_integral_pC")
             actions.append(h2[name])
 
     ROOT.RDF.RunGraphs(actions)
@@ -161,59 +176,72 @@ def main():
     for ch in channels:
         role = "trigger PMT" if ch == trigger_ch else "outer PMT"
         plot_utils.plot_hist_1d(
-            h1[f"ch{ch}_integral_pC"].GetPtr(),
-            os.path.join(outdir, f"ch{ch}_integral_pC"),
-            run_label,
+            h1[f"ch{ch}_integral_pC_all"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_integral_pC_all"),
             x_title=f"CH{ch} ({role}) charge integral [pC]",
-            y_title="events",
+            y_title="events / bin",
+            extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
         plot_utils.plot_hist_1d(
-            h1[f"ch{ch}_peak_mv"].GetPtr(),
-            os.path.join(outdir, f"ch{ch}_peak_mv"),
-            run_label,
+            h1[f"ch{ch}_peak_mv_all"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_peak_mv_all"),
             x_title=f"CH{ch} ({role}) pulse depth [mV]",
-            y_title="events",
+            y_title="events / bin",
+            extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
+        if ch != trigger_ch:
+            plot_utils.plot_hist_1d(
+                h1[f"ch{ch}_integral_pC_hit"].GetPtr(),
+                os.path.join(outdir, f"ch{ch}_integral_pC_hit"),
+                x_title=f"CH{ch} ({role}) charge integral [pC]",
+                y_title="events / bin",
+                extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+            )
+            plot_utils.plot_hist_1d(
+                h1[f"ch{ch}_peak_mv_hit"].GetPtr(),
+                os.path.join(outdir, f"ch{ch}_peak_mv_hit"),
+                x_title=f"CH{ch} ({role}) pulse depth [mV]",
+                y_title="events / bin",
+                extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+            )
 
-    # overlay of all outer-PMT integrals, for a direct by-eye comparison
+    # overlay of all outer-PMT integrals (hit-filtered), for a direct by-eye comparison
     plot_utils.plot_hists_1d(
-        [h1[f"ch{ch}_integral_pC"].GetPtr() for ch in outer],
+        [h1[f"ch{ch}_integral_pC_hit"].GetPtr() for ch in outer],
         [f"CH{ch}" for ch in outer],
         os.path.join(outdir, "outer_pmts_integral_pC_overlay"),
-        run_label,
         x_title="charge integral [pC]",
-        y_title="events",
+        y_title="events / bin",
+        extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
     )
 
     for ch in outer:
         plot_utils.plot_hist_1d(
-            h1[f"ch{ch}_dt_samples_all"].GetPtr(),
-            os.path.join(outdir, f"ch{ch}_dt_samples_all"),
-            run_label,
-            x_title=f"CH{ch} peak time - CH{trigger_ch} peak time [samples, 1 = 80ps]",
-            y_title="events",
+            h1[f"ch{ch}_dt_ns_all"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_dt_ns_all"),
+            x_title=f"time of CH{ch} peak minus time of CH{trigger_ch} peak [ns]",
+            y_title="events / bin",
             extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
         plot_utils.plot_hist_1d(
-            h1[f"ch{ch}_dt_samples_hit"].GetPtr(),
-            os.path.join(outdir, f"ch{ch}_dt_samples_hit"),
-            run_label,
-            x_title=f"CH{ch} peak time - CH{trigger_ch} peak time [samples, 1 = 80ps]",
-            y_title="events",
-            extra_left=plot_utils.HEADER_LEFT + f" -- peak > {args.hit_threshold_mv:.0f}mV",
+            h1[f"ch{ch}_dt_ns_hit"].GetPtr(),
+            os.path.join(outdir, f"ch{ch}_dt_ns_hit"),
+            x_title=f"time of CH{ch} peak minus time of CH{trigger_ch} peak [ns]",
+            y_title="events / bin",
+            extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
         )
 
     for i in range(len(outer)):
         for j in range(i + 1, len(outer)):
             a, b = outer[i], outer[j]
-            name = f"ch{a}_vs_ch{b}_integral_pC"
+            name = f"ch{a}_vs_ch{b}_integral_pC_hit"
             plot_utils.plot_hist_2d(
                 h2[name].GetPtr(),
                 os.path.join(outdir, name),
-                run_label,
-                x_title=f"CH{a} integral [pC]",
-                y_title=f"CH{b} integral [pC]",
-                z_title="events",
+                x_title=f"CH{a} charge integral [pC]",
+                y_title=f"CH{b} charge integral [pC]",
+                z_title="events / bin",
+                extra_left=plot_utils.HEADER_LEFT + f" -- both peaks > {thr:.0f}mV",
             )
 
     print(f"Wrote plots to {outdir}")

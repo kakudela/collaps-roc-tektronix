@@ -2,10 +2,9 @@
 Lightweight ROOT plotting helpers for the COLLAPS ROC muon DAQ.
 
 Styled after the FCC-ee analysis plot_utils.py (same TLatex header
-convention: bold project name top-left, run label top-right; same frame/
-margin layout) but scoped down to plain 1D/2D histograms for this project --
-no acceptance-map overlays or step-graph zero-skipping, since our histograms
-don't need them.
+convention and frame/margin layout) but scoped down to plain 1D/2D
+histograms for this project -- no acceptance-map overlays or step-graph
+zero-skipping, since our histograms don't need them.
 """
 import os
 import shutil
@@ -13,11 +12,6 @@ import shutil
 import ROOT
 
 HEADER_LEFT = "#bf{COLLAPS ROC} #scale[0.7]{#it{Muon DAQ}}"
-
-
-def run_header_right(run_label):
-    """Right-aligned header text for a given run label, e.g. 'run_20260706_172716'."""
-    return f"Run {run_label}"
 
 
 def ensure_index_php(dirpath, index_php_source):
@@ -41,23 +35,17 @@ def _style_axes(h):
     h.GetYaxis().SetNdivisions(510)
 
 
-def _draw_headers(run_label, extra_left=None, extra_right=None):
+def _draw_headers(extra_left=None):
     lx = ROOT.TLatex()
     lx.SetTextSize(0.035)
     lx.SetTextFont(42)
     lx.SetTextAlign(13)
     lx.DrawLatexNDC(0.16, 0.95, extra_left if extra_left is not None else HEADER_LEFT)
 
-    lx2 = ROOT.TLatex()
-    lx2.SetTextSize(0.035)
-    lx2.SetTextFont(42)
-    lx2.SetTextAlign(33)
-    lx2.DrawLatexNDC(0.95, 0.95, extra_right if extra_right is not None else run_header_right(run_label))
 
-
-def plot_hists_1d(hists, labels, outname, run_label, x_title="", y_title="entries",
+def plot_hists_1d(hists, labels, outname, x_title="", y_title="entries",
                    colors=None, logy=False, line_width=3, y_factor=1.25,
-                   canvas_size=(800, 700), extra_left=None, extra_right=None):
+                   canvas_size=(800, 700), extra_left=None):
     """Overlay one or more 1D histograms on a single canvas; saves PNG+PDF."""
     if not hists:
         return
@@ -102,20 +90,20 @@ def plot_hists_1d(hists, labels, outname, run_label, x_title="", y_title="entrie
             leg.AddEntry(hc, lab, "l")
         leg.Draw()
 
-    _draw_headers(run_label, extra_left, extra_right)
+    _draw_headers(extra_left)
     c.Modified()
     c.Update()
     c.SaveAs(f"{outname}.png")
     c.SaveAs(f"{outname}.pdf")
 
 
-def plot_hist_1d(hist, outname, run_label, x_title="", y_title="entries", **kwargs):
+def plot_hist_1d(hist, outname, x_title="", y_title="entries", **kwargs):
     """Single-histogram convenience wrapper around plot_hists_1d."""
-    plot_hists_1d([hist], [], outname, run_label, x_title=x_title, y_title=y_title, **kwargs)
+    plot_hists_1d([hist], [], outname, x_title=x_title, y_title=y_title, **kwargs)
 
 
-def plot_hist_2d(hist, outname, run_label, x_title="", y_title="", z_title="",
-                  canvas_size=(900, 750), logz=False, extra_left=None, extra_right=None):
+def plot_hist_2d(hist, outname, x_title="", y_title="", z_title="",
+                  canvas_size=(900, 750), logz=False, extra_left=None):
     """2D COLZ plot with the same header convention as the 1D plots."""
     ROOT.gStyle.SetOptStat(0)
     h = hist.Clone(f"{hist.GetName()}_plot2d")
@@ -137,7 +125,7 @@ def plot_hist_2d(hist, outname, run_label, x_title="", y_title="", z_title="",
         c.SetLogz()
     h.Draw("COLZ")
 
-    _draw_headers(run_label, extra_left, extra_right)
+    _draw_headers(extra_left)
     c.Modified()
     c.Update()
     c.SaveAs(f"{outname}.png")
