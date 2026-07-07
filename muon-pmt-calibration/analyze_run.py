@@ -100,7 +100,6 @@ def main():
     print(f"Loaded {len(files)} files, {n_events} events, channels {channels}, trigger=CH{trigger_ch}")
 
     h1 = {}
-    h2 = {}
     actions = []
 
     def book_h1(name, bins, col, node=None):
@@ -149,25 +148,11 @@ def main():
         hit_node = df.Filter(f"ch{ch}_peak_mv > {thr}")
         book_h1(f"ch{ch}_dt_ns_hit", (200, -40.0, 40.0), f"ch{ch}_dt_ns", node=hit_node)
 
-    # 2D correlation between outer-PMT integrals, restricted to events where
-    # BOTH channels registered a real hit -- a genuine two-PMT coincidence.
-    # (Without this cut the plot is dominated by the "neither channel really
-    # fired" population sitting near zero on both axes, which swamps any
-    # real correlation.)
-    for i in range(len(outer)):
-        for j in range(i + 1, len(outer)):
-            a, b = outer[i], outer[j]
-            name = f"ch{a}_vs_ch{b}_integral_pC_hit"
-            coinc_node = df.Filter(f"ch{a}_peak_mv > {thr} && ch{b}_peak_mv > {thr}")
-            h2[name] = coinc_node.Histo2D((name, "", 100, 0.0, 20.0, 100, 0.0, 20.0),
-                                           f"ch{a}_integral_pC", f"ch{b}_integral_pC")
-            actions.append(h2[name])
-
     ROOT.RDF.RunGraphs(actions)
 
     out_root = os.path.join(outdir, "analysis.root")
     tf = ROOT.TFile(out_root, "RECREATE")
-    for name, h in {**h1, **h2}.items():
+    for name, h in h1.items():
         h.GetPtr().Write(name)
     tf.Close()
     print(f"Wrote histograms to {out_root}")
@@ -230,19 +215,6 @@ def main():
             y_title="events / bin",
             extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
         )
-
-    for i in range(len(outer)):
-        for j in range(i + 1, len(outer)):
-            a, b = outer[i], outer[j]
-            name = f"ch{a}_vs_ch{b}_integral_pC_hit"
-            plot_utils.plot_hist_2d(
-                h2[name].GetPtr(),
-                os.path.join(outdir, name),
-                x_title=f"CH{a} charge integral [pC]",
-                y_title=f"CH{b} charge integral [pC]",
-                z_title="events / bin",
-                extra_left=plot_utils.HEADER_LEFT + f" -- both peaks > {thr:.0f}mV",
-            )
 
     print(f"Wrote plots to {outdir}")
 
