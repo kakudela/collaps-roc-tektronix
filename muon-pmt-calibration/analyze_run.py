@@ -62,6 +62,32 @@ int waveform_peak_index(const RVec<Short_t>& wf) {
 DEFAULT_INDEX_PHP = os.path.expanduser("~/public_html/fccee/beam_background/index.php")
 
 
+def fit_landau(hist, fit_lo, fit_hi):
+    """Fit a Landau distribution (the standard shape for charged-particle
+    energy loss through a fixed thickness of material) to a charge-integral
+    histogram. Returns (params_dict_or_None, TF1).
+
+    fit_lo is set above 0 deliberately: events near the hit-threshold cut are
+    partly shaped by that selection, not pure physics, so including the very
+    bottom of the distribution would bias the fit. fit_hi excludes the
+    sparsest part of the far tail, where per-bin statistics are too low to
+    usefully constrain the fit."""
+    name = f"landau_{hist.GetName()}"
+    f = ROOT.TF1(name, "landau", fit_lo, fit_hi)
+    peak_x = hist.GetXaxis().GetBinCenter(hist.GetMaximumBin())
+    f.SetParameters(hist.GetMaximum(), peak_x, max(hist.GetRMS() * 0.5, 0.5))
+    fit_result = hist.Fit(f, "SQR")  # S=return result, Q=quiet, R=use f's own range
+    if int(fit_result) != 0:
+        return None, f
+    ndf = f.GetNDF()
+    params = dict(
+        mpv=f.GetParameter(1), mpv_err=f.GetParError(1),
+        sigma=f.GetParameter(2), sigma_err=f.GetParError(2),
+        chi2_ndf=(f.GetChisquare() / ndf) if ndf > 0 else float("nan"),
+    )
+    return params, f
+
+
 def main():
     ap = argparse.ArgumentParser(description="Analyze one run of MSO46 scope data with RDataFrame")
     ap.add_argument("run_dir", help="path to a run_YYYYMMDD_HHMMSS folder (rsynced from the DAQ laptop)")
@@ -168,6 +194,7 @@ def main():
     print(f"Wrote histograms to {out_root}")
 
     # ── plots ──────────────────────────────────────────────────────────────
+    landau_fits = {}
     for ch in channels:
         role = "trigger PMT" if ch == trigger_ch else "outer PMT"
         plot_utils.plot_hist_1d(
@@ -185,12 +212,22 @@ def main():
             extra_left=plot_utils.HEADER_LEFT + " -- all triggers",
         )
         if ch != trigger_ch:
+            fit_params, fit_func = fit_landau(h1[f"ch{ch}_integral_pC_hit"].GetPtr(),
+                                               fit_lo=2.0, fit_hi=40.0)
+            landau_fits[ch] = fit_params
+            if fit_params:
+                annotation = (f"Landau fit: MPV = {fit_params['mpv']:.2f} #pm {fit_params['mpv_err']:.2f} pC\n"
+                              f"#chi^{{2}}/ndf = {fit_params['chi2_ndf']:.2f}")
+            else:
+                annotation = "Landau fit did not converge"
             plot_utils.plot_hist_1d(
                 h1[f"ch{ch}_integral_pC_hit"].GetPtr(),
                 os.path.join(outdir, f"ch{ch}_integral_pC_hit"),
                 x_title=f"CH{ch} ({role}) charge integral [pC]",
                 y_title="events / bin",
                 extra_left=plot_utils.HEADER_LEFT + f" -- peak > {thr:.0f}mV",
+                fit_func=fit_func,
+                annotation=annotation,
             )
             plot_utils.plot_hist_1d(
                 h1[f"ch{ch}_peak_mv_hit"].GetPtr(),
@@ -249,6 +286,17 @@ def main():
     )
 
     print(f"Wrote plots to {outdir}")
+
+    print()
+    print("=== Landau fit MPV per channel (calibration reference point) ===")
+    for ch in outer:
+        p = landau_fits.get(ch)
+        if p:
+            print(f"CH{ch}: MPV = {p['mpv']:.2f} +/- {p['mpv_err']:.2f} pC   "
+                  f"sigma = {p['sigma']:.2f} +/- {p['sigma_err']:.2f} pC   "
+                  f"chi2/ndf = {p['chi2_ndf']:.2f}")
+        else:
+            print(f"CH{ch}: fit did not converge")
 
 
 if __name__ == "__main__":

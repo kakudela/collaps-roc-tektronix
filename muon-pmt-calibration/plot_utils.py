@@ -45,8 +45,11 @@ def _draw_headers(extra_left=None):
 
 def plot_hists_1d(hists, labels, outname, x_title="", y_title="entries",
                    colors=None, logy=False, line_width=3, y_factor=1.25,
-                   canvas_size=(800, 700), extra_left=None):
-    """Overlay one or more 1D histograms on a single canvas; saves PNG+PDF."""
+                   canvas_size=(800, 700), extra_left=None,
+                   fit_func=None, annotation=None):
+    """Overlay one or more 1D histograms on a single canvas; saves PNG+PDF.
+    fit_func: an already-fitted ROOT.TF1, drawn on top as a dashed curve.
+    annotation: extra text line(s) drawn below the header (e.g. fit results)."""
     if not hists:
         return
     ROOT.gStyle.SetOptStat(0)
@@ -81,6 +84,12 @@ def plot_hists_1d(hists, labels, outname, x_title="", y_title="entries",
     for hc in hists_draw[1:]:
         hc.Draw("HIST SAME")
 
+    if fit_func is not None:
+        fit_func.SetLineColor(ROOT.kBlack)
+        fit_func.SetLineStyle(2)
+        fit_func.SetLineWidth(2)
+        fit_func.Draw("SAME")
+
     if labels:
         leg = ROOT.TLegend(0.65, 0.90 - 0.05 * len(labels), 0.94, 0.90)
         leg.SetBorderSize(0)
@@ -91,6 +100,15 @@ def plot_hists_1d(hists, labels, outname, x_title="", y_title="entries",
         leg.Draw()
 
     _draw_headers(extra_left)
+
+    if annotation:
+        lx = ROOT.TLatex()
+        lx.SetTextSize(0.032)
+        lx.SetTextFont(42)
+        lx.SetTextAlign(13)
+        for i, line in enumerate(annotation.split("\n")):
+            lx.DrawLatexNDC(0.17, 0.87 - i * 0.045, line)
+
     c.Modified()
     c.Update()
     c.SaveAs(f"{outname}.png")
