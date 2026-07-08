@@ -1,10 +1,9 @@
 """
 Lightweight ROOT plotting helpers for the COLLAPS ROC muon DAQ.
 
-Styled after the FCC-ee analysis plot_utils.py (same TLatex header
-convention and frame/margin layout) but scoped down to plain 1D/2D
-histograms for this project -- no acceptance-map overlays or step-graph
-zero-skipping, since our histograms don't need them.
+Same header/margin style as the FCC-ee plot_utils.py, just stripped down
+to plain 1D/2D histograms since this project doesn't need the acceptance
+overlays or step-graph stuff.
 """
 import os
 import shutil
@@ -15,9 +14,8 @@ HEADER_LEFT = "#bf{COLLAPS ROC} #scale[0.7]{#it{Muon DAQ}}"
 
 
 def ensure_index_php(dirpath, index_php_source):
-    """Copy the standard public_html index.php into dirpath if it isn't there yet.
-    Every directory under public_html needs its own copy for the site's
-    formatting/browsing to work -- this is called for every dir we create."""
+    """Copy index.php into dirpath if it's not already there. Every dir
+    under public_html needs its own copy for the browsing to work right."""
     os.makedirs(dirpath, exist_ok=True)
     dest = os.path.join(dirpath, "index.php")
     if not os.path.exists(dest) and index_php_source and os.path.exists(index_php_source):

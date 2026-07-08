@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """
 RDataFrame analysis for one run of scope data (data/run_YYYYMMDD_HHMMSS/),
-copied over from the DAQ laptop. Computes, per channel, per event:
-  - baseline   (mean ADC value in the first N samples, before the pulse)
-  - integral   (charge proxy: sum of baseline-minus-sample, converted to
-                picocoulombs assuming 50-ohm termination)
-  - peak       (pulse depth in mV, baseline minus the minimum sample)
-  - peak_idx   (which sample the pulse peaks at, used for timing)
-  - n_outer_hit (0-4: how many of the outer PMTs registered a real hit)
+copied over from the DAQ laptop. Per channel, per event, computes:
+  - baseline    mean ADC value in the first N samples, before the pulse
+  - integral    charge proxy in picocoulombs (baseline-minus-sample, summed)
+  - peak        pulse depth in mV
+  - peak_idx    which sample the pulse peaks at, used for timing
+  - n_outer_hit how many of the 4 outer PMTs registered a real hit (0-4)
 
-A trigger firing on CH1 does not mean every outer PMT saw a real hit that
-event, most of the time only some of them did, the rest just show baseline
-noise. So integral/peak/timing are all booked twice:
-  "_all" - every trigger, noise-dominated for channels with no real hit
-  "_hit" - only events where that channel's peak clears --hit-threshold-mv
-The "_hit" versions are the physically meaningful ones.
+CH1 firing doesn't mean every outer PMT actually saw anything, usually
+only some of them did and the rest is just baseline noise. So everything
+gets booked twice, "_all" (every trigger, noisy) and "_hit" (only events
+past --hit-threshold-mv). The "_hit" versions are the ones that matter.
 
-Every run also prints (and saves to summary.txt) a full numeric report:
-metadata, trigger rate, per-channel hit fractions, outer-PMT multiplicity
-breakdown, timing offsets, and Landau fit results. The report contains
-numbers and results only, no interpretation of what they mean.
+Every run also dumps a full numeric report to summary.txt: metadata,
+trigger rate, hit fractions, multiplicity breakdown, timing, Landau fits.
+Numbers and results only, no interpretation.
 
 Run on a machine with PyROOT (e.g. submit):
     python3 analyze_run.py /path/to/run_20260706_172716
@@ -70,25 +66,20 @@ DEFAULT_INDEX_PHP = os.path.expanduser("~/public_html/fccee/beam_background/inde
 
 
 def fit_landau(hist, fit_lo, fit_hi, rebin_factor=1):
-    """Fit a Landau distribution (the standard shape for charged-particle
-    energy loss through a fixed thickness of material) to a charge-integral
-    histogram. Returns (params_dict_or_None, TF1).
+    """Fit a Landau (the standard shape for charged-particle energy loss)
+    to a charge-integral histogram. Returns (params_dict_or_None, TF1).
 
-    fit_lo is set above 0 deliberately: events near the hit-threshold cut are
-    partly shaped by that selection, not pure physics, so including the very
-    bottom of the distribution would bias the fit. fit_hi excludes the
-    sparsest part of the far tail, where per-bin statistics are too low to
-    usefully constrain the fit.
+    fit_lo sits above 0 on purpose, the bottom of the distribution is
+    shaped by the hit-threshold cut, not pure physics, so including it
+    would bias the fit. fit_hi cuts off before the tail gets too sparse
+    to actually constrain anything.
 
-    rebin_factor merges this many display-bins into one wider "fit bin"
-    before fitting. The fit is genuinely sensitive to bin width: chi-squared
-    per bin uses sqrt(counts) as the expected statistical noise, so if bins
-    are so fine that some only have a handful of entries (or zero), that
-    noise estimate gets noisy/unreliable itself, which can inflate chi2/ndf
-    for reasons that have nothing to do with whether the Landau shape is
-    actually a good description of the data. Rebinning for the fit only
-    (the displayed histogram is untouched) keeps the fit on bins with
-    healthy statistics regardless of how finely the plot itself is binned."""
+    rebin_factor merges display-bins into wider bins just for the fit.
+    Fitting bins that are too fine (few events each) makes chi-squared's
+    sqrt(counts) noise estimate unreliable and messes up chi2/ndf for
+    reasons that have nothing to do with the Landau shape being right or
+    wrong. This keeps the fit on healthy bin statistics no matter how
+    finely the displayed histogram itself is binned."""
     hfit = hist.Clone(f"{hist.GetName()}_fitcopy")
     hfit.SetDirectory(0)
     if rebin_factor > 1:
@@ -108,18 +99,13 @@ def fit_landau(hist, fit_lo, fit_hi, rebin_factor=1):
         chi2_ndf=(f.GetChisquare() / ndf) if ndf > 0 else float("nan"),
     )
 
-    # The fit's height (param 0) was determined against hfit's wider bins,
-    # which each contain ~rebin_factor times more events than the original
-    # display histogram's bins. Drawing that curve as-is on top of the fine
-    # display histogram would overshoot by that same factor, so rescale it
-    # back down so the curve's height actually matches the bars it's drawn
-    # over. MPV and sigma (params 1, 2) describe the curve's x-axis shape,
-    # not its height, so they're untouched.
+    # height (param 0) was fit against hfit's wider bins, so it's scaled for
+    # bars ~rebin_factor times taller than what we're about to draw it over.
+    # Scale it back down or the curve overshoots the actual histogram.
     if rebin_factor > 1:
         f.SetParameter(0, f.GetParameter(0) / rebin_factor)
 
-    # attach the fit to the actual (fine-binned) histogram too, purely so it
-    # gets saved to the output ROOT file alongside it
+    # stick the fit on the real histogram so it gets saved with it later
     hist.GetListOfFunctions().Add(f)
     return params, f
 
@@ -223,19 +209,10 @@ def main():
         df = df.Define(f"ch{ch}_integral_pC",
                         f"ch{ch}_integral_raw * {ymult} * {xincr} / {R} * 1.0e12")
 
-        # NOTE: bin ranges below are rough starting guesses based on this
-        # detector's earlier test data, widen/rebin once you've looked at
-        # the actual histograms for your real run.
-        #
-        # integral_pC range is 0-60pC: 0-20pC silently cut off 18-33% of
-        # events per channel (worst for CH5), the real tail extends out to
-        # 100-250pC in rare high-energy events. 0-60pC captures 97-99%.
-        #
-        # Display binning is much finer than the fit binning: fine bins
-        # make the plot show more real structure, but fitting a Landau
-        # directly against bins this fine would mean very few events per
-        # bin, which destabilizes the fit. fit_landau() works off a coarser
-        # rebinned copy internally, decoupled from the display binning.
+        # 0-60pC range: 0-20pC was cutting off 18-33% of events per channel
+        # (the real tail runs out to 100-250pC for rare high-energy hits).
+        # Bins here are finer than what fit_landau() actually fits on, see
+        # the rebin_factor comment down at the fit call for why.
         book_h1(f"ch{ch}_peak_mv_all", (500, 0.0, 500.0), f"ch{ch}_peak_mv")
         book_h1(f"ch{ch}_integral_pC_all", (120, 0.0, 60.0), f"ch{ch}_integral_pC")
 
@@ -288,10 +265,8 @@ def main():
         )
         add_plot(f"ch{ch}_peak_mv_all", f"CH{ch} pulse depth [mV], all triggers")
         if ch != trigger_ch:
-            # integral_pC_hit is booked at 0.5pC/bin (120 bins over 60pC) for
-            # a fine-grained plot; rebin_factor=2 merges that back to 1pC/bin
-            # for the fit itself, which is the bin width already confirmed
-            # to give stable chi2/ndf around 1 for this amount of statistics.
+            # display is 0.5pC/bin, rebin_factor=2 merges that to 1pC/bin
+            # just for the fit, which is what actually gave stable chi2/ndf
             fit_params, fit_func = fit_landau(h1[f"ch{ch}_integral_pC_hit"].GetPtr(),
                                                fit_lo=2.0, fit_hi=40.0, rebin_factor=2)
             landau_fits[ch] = fit_params

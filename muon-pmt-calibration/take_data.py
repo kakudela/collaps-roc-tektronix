@@ -28,14 +28,13 @@ TRIGGER_CHANNEL = 1
 PMT_CHANNELS = [2, 3, 4, 5]
 ALL_CHANNELS = [TRIGGER_CHANNEL] + PMT_CHANNELS
 
-# Per-channel vertical settings. Tune these to your actual signal amplitudes
-# before a real run -- these are placeholders, not calibrated values.
+# Tune these to your actual signal amplitudes before a real run, these are
+# just placeholders.
 CHANNEL_SETTINGS = {
-    # NOTE: CH1 at 100mV/div stopped triggering entirely (confirmed live: 0
-    # triggers in 10+ seconds at a rate that should give ~2Hz). Reverted to
-    # 20mV/div, which is confirmed triggering. This means CH1's own waveform
-    # will clip/rail in the saved data -- that's fine since CH1 is only used
-    # as the trigger/timing reference here, not for its own pulse-height.
+    # CH1 at 100mV/div flat out stopped triggering (tested live, 0 triggers
+    # in 10+ sec at what should be ~2Hz). 20mV/div works, but it means CH1's
+    # own waveform clips in the data. Fine since CH1 is only used for
+    # triggering/timing, we never look at its pulse height.
     1: dict(scale=0.02, offset=0.0, termination=50.0),   # trigger PMT (inner detector)
     2: dict(scale=0.1,  offset=0.0, termination=50.0),   # outer PMT 1
     3: dict(scale=0.1,  offset=0.0, termination=50.0),   # outer PMT 2
@@ -121,10 +120,9 @@ def get_waveform_scaling(inst, ch):
 
 
 def get_full_metadata(inst, include_waveform_scaling):
-    """Snapshot of every setting needed to interpret the raw ADC counts later:
-    channel scale/offset/termination/bandwidth/coupling/probe gain, trigger
-    source/slope/level/coupling, horizontal record length/sample rate/FastFrame
-    count, and (once real data exists) the WFMOUTPRE scaling per channel."""
+    """Everything you'd need to interpret the raw ADC counts later: channel
+    settings, trigger config, horizontal settings, and (once there's real
+    data) the WFMOUTPRE scaling per channel."""
     meta = {
         "idn": inst.query("*IDN?").strip(),
         "captured_at": datetime.now().isoformat(),
@@ -198,9 +196,9 @@ def acquire_batch(inst, n_frames, record_length):
 
 
 def save_batch_root(path, waveforms, batch_start_iso, duration_s):
-    """Writes one self-contained ROOT file per batch: open, fill, close, done.
-    Never reopened afterward, so a crash can only ever affect the batch
-    currently being written -- every .root file that exists is valid."""
+    """One ROOT file per batch: open, fill, close, done. Never reopened, so
+    a crash only ever costs you the batch in progress, everything already
+    written to disk stays valid."""
     n_events = waveforms.shape[0]
     branch_types = {"frame": "int32", "batch_start_unix": "float64", "duration_s": "float64"}
     branch_types.update({f"ch{ch}_raw": ("int16", (waveforms.shape[2],)) for ch in ALL_CHANNELS})
@@ -255,9 +253,8 @@ def main():
             waveforms = acquire_batch(inst, args.frames, args.record_length)
             dt = time.time() - t0
 
-            # WFMOUTPRE scaling only reads back correctly once the scope holds
-            # real acquired data, so fill it in after the first batch and
-            # persist the completed metadata snapshot for the whole run.
+            # WFMOUTPRE only reads back correctly once there's real data on
+            # the scope, so grab it after the first batch and save it once.
             if "ymult" not in metadata["channels"][str(TRIGGER_CHANNEL)]:
                 metadata = get_full_metadata(inst, include_waveform_scaling=True)
                 metadata_path.write_text(json.dumps(metadata, indent=2))
