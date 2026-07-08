@@ -214,13 +214,18 @@ def main():
         # Bins here are finer than what fit_landau() actually fits on, see
         # the rebin_factor comment down at the fit call for why.
         book_h1(f"ch{ch}_peak_mv_all", (500, 0.0, 500.0), f"ch{ch}_peak_mv")
-        book_h1(f"ch{ch}_integral_pC_all", (180, 0.0, 60.0), f"ch{ch}_integral_pC")
+        book_h1(f"ch{ch}_integral_pC_all", (120, 0.0, 60.0), f"ch{ch}_integral_pC")
 
         if ch != trigger_ch:
             df = df.Define(f"ch{ch}_is_hit", f"ch{ch}_peak_mv > {thr}")
             hit_node = df.Filter(f"ch{ch}_is_hit")
             book_h1(f"ch{ch}_peak_mv_hit", (500, 0.0, 500.0), f"ch{ch}_peak_mv", node=hit_node)
-            book_h1(f"ch{ch}_integral_pC_hit", (180, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
+            book_h1(f"ch{ch}_integral_pC_hit", (120, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
+
+            # separate, finer-binned histograms just for the CH2-5 overlay
+            # plots below, kept independent of the ones fit_landau() uses
+            book_h1(f"ch{ch}_integral_pC_overlay_all", (240, 0.0, 60.0), f"ch{ch}_integral_pC")
+            book_h1(f"ch{ch}_integral_pC_overlay_hit", (240, 0.0, 60.0), f"ch{ch}_integral_pC", node=hit_node)
 
     # timing offset of each outer channel's peak relative to the trigger
     # channel, in real nanoseconds (not raw sample counts)
@@ -265,11 +270,10 @@ def main():
         )
         add_plot(f"ch{ch}_peak_mv_all", f"CH{ch} pulse depth [mV], all triggers")
         if ch != trigger_ch:
-            # display is 60pC/180bins = 1/3 pC/bin, rebin_factor=3 merges
-            # that to 1pC/bin just for the fit, still the width that gave
-            # stable chi2/ndf
+            # display is 0.5pC/bin, rebin_factor=2 merges that to 1pC/bin
+            # just for the fit, which is what actually gave stable chi2/ndf
             fit_params, fit_func = fit_landau(h1[f"ch{ch}_integral_pC_hit"].GetPtr(),
-                                               fit_lo=2.0, fit_hi=40.0, rebin_factor=3)
+                                               fit_lo=2.0, fit_hi=40.0, rebin_factor=2)
             landau_fits[ch] = fit_params
             if fit_params:
                 annotation = (f"Landau fit: MPV = {fit_params['mpv']:.2f} #pm {fit_params['mpv_err']:.2f} pC\n"
@@ -303,9 +307,12 @@ def main():
             )
             add_plot(f"ch{ch}_peak_mv_hit", f"CH{ch} pulse depth [mV], peak > {thr:.0f}mV")
 
-    # overlay of all outer-PMT integrals, both unfiltered and hit-filtered
+    # overlay of all outer-PMT integrals, both unfiltered and hit-filtered.
+    # Uses the dedicated _overlay_all/_overlay_hit histograms booked above,
+    # not the ones fit_landau() uses, so this binning is free to change
+    # without touching the fit.
     plot_utils.plot_hists_1d(
-        [h1[f"ch{ch}_integral_pC_all"].GetPtr() for ch in outer],
+        [h1[f"ch{ch}_integral_pC_overlay_all"].GetPtr() for ch in outer],
         [f"CH{ch}" for ch in outer],
         os.path.join(outdir, "outer_pmts_integral_pC_all_overlay"),
         x_title="charge integral [pC]",
@@ -316,7 +323,7 @@ def main():
     add_plot("outer_pmts_integral_pC_all_overlay", "CH2-5 charge integral [pC] overlaid, all triggers")
 
     plot_utils.plot_hists_1d(
-        [h1[f"ch{ch}_integral_pC_hit"].GetPtr() for ch in outer],
+        [h1[f"ch{ch}_integral_pC_overlay_hit"].GetPtr() for ch in outer],
         [f"CH{ch}" for ch in outer],
         os.path.join(outdir, "outer_pmts_integral_pC_overlay"),
         x_title="charge integral [pC]",
